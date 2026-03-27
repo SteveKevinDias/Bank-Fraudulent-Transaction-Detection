@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+joblib
+datetime
+google-generativeai
+pymongo
+python-dotenv
