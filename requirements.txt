@@ -6,3 +6,5 @@ datetime
 google-generativeai
 pymongo
 python-dotenv
+scikit-learn
+xgboost
