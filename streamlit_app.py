@@ -40,7 +40,7 @@ gemini_api_key = st.sidebar.text_input("Enter Gemini API Key", type="password", 
 @st.cache_resource
 def get_mongo_client():
     load_dotenv(override=True)
-    mongo_uri = os.getenv("MONGO_URI")
+    mongo_uri = st.secrets["MONGO_URI"]
     if not mongo_uri:
         return None
     try:
