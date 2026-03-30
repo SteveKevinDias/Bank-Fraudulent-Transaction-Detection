@@ -24,7 +24,6 @@ st.set_page_config(
 # Load Model
 @st.cache_resource
 def load_model():
-    # Load the dictionary
     data = joblib.load('best_fraud_model_tuned.pkl')
     return data
 
@@ -34,7 +33,14 @@ threshold = model_data['threshold']
 
 # Sidebar - Settings
 st.sidebar.header("Configuration")
-gemini_api_key = st.sidebar.text_input("Enter Gemini API Key", type="password", help="Required to generate the AI Analyst review.")
+gemini_api_key = st.sidebar.text_input(
+    "Enter Gemini API Key",
+    type="password",
+    help="Optional – required to unlock the AI Analyst review."
+)
+
+if not gemini_api_key:
+    st.sidebar.info("🔑 No API key provided. ML prediction & MongoDB logging are still active. AI Analyst review requires a key.")
 
 
 @st.cache_resource
@@ -45,7 +51,6 @@ def get_mongo_client():
         return None
     try:
         client = MongoClient(mongo_uri)
-        # Send a ping to confirm a successful connection
         client.admin.command('ping')
         return client
     except Exception as e:
@@ -62,14 +67,20 @@ else:
 
 # UI Header
 st.title("🛡️ Advanced Fraud Detection & AI Analyst")
-st.markdown("Enter transaction details below to evaluate the likelihood of fraud using our ML model, audited by a Google Gemini AI Analyst and recorded into MongoDB.")
+st.markdown(
+    "Enter transaction details below to evaluate the likelihood of fraud using our ML model. "
+    "Provide a Gemini API key to also receive an AI Analyst review. All results are recorded in MongoDB."
+)
 
 # Create columns for inputs
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Transaction Details")
-    step = st.number_input("Time Step (Hours)", min_value=1, value=1, step=1, help="Maps a unit of time in the real world. 1 step is 1 hour of time.")
+    step = st.number_input(
+        "Time Step (Hours)", min_value=1, value=1, step=1,
+        help="Maps a unit of time in the real world. 1 step is 1 hour of time."
+    )
     amount = st.number_input("Transaction Amount ($)", min_value=0.0, value=150000.0, step=1000.0)
 
 with col2:
@@ -86,40 +97,51 @@ with col4:
 
 # Prediction Button
 if st.button("Analyze Transaction", use_container_width=True, type="primary"):
-    if not gemini_api_key:
-        st.error("Please provide your Gemini API Key in the sidebar to run the analysis.")
-    else:
-        with st.spinner("Analyzing patterns and consulting AI Analyst..."):
-            # Derive features based on notebook logic
-            log_amount = np.log1p(amount)
-            # Using 99th percentile determined from dataset: 1615979.47
-            is_high_amount = 1 if amount > 1615979.47 else 0
-            hour = step % 24
-            is_night = 1 if hour in [0, 1, 2, 3, 4, 5, 22, 23] else 0
-            balance_diff_orig = oldbalanceOrg - newbalanceOrig
-            balance_diff_dest = newbalanceDest - oldbalanceDest
-            
-            # Build Dataframe mapping exact feature names
-            input_data = pd.DataFrame([[
-                step, 
-                amount, 
-                log_amount, 
-                is_high_amount, 
-                hour, 
-                is_night, 
-                balance_diff_orig, 
-                balance_diff_dest
-            ]], columns=model_data['features'])
-            
-            # Predict
-            pos_proba = model.predict_proba(input_data)[0][1]
-            model_prediction = "Fraud" if pos_proba >= threshold else "Safe"
-            
-            # Call Gemini
+
+    spinner_msg = (
+        "Analyzing patterns and consulting AI Analyst..."
+        if gemini_api_key
+        else "Running ML analysis..."
+    )
+
+    with st.spinner(spinner_msg):
+
+        # ------------------------------------------------------------------
+        # 1. Feature Engineering
+        # ------------------------------------------------------------------
+        log_amount = np.log1p(amount)
+        is_high_amount = 1 if amount > 1615979.47 else 0   # 99th-percentile from dataset
+        hour = step % 24
+        is_night = 1 if hour in [0, 1, 2, 3, 4, 5, 22, 23] else 0
+        balance_diff_orig = oldbalanceOrg - newbalanceOrig
+        balance_diff_dest = newbalanceDest - oldbalanceDest
+
+        input_data = pd.DataFrame([[
+            step,
+            amount,
+            log_amount,
+            is_high_amount,
+            hour,
+            is_night,
+            balance_diff_orig,
+            balance_diff_dest
+        ]], columns=model_data['features'])
+
+        # ------------------------------------------------------------------
+        # 2. ML Prediction  (always runs)
+        # ------------------------------------------------------------------
+        pos_proba = model.predict_proba(input_data)[0][1]
+        model_prediction = "Fraud" if pos_proba >= threshold else "Safe"
+
+        # ------------------------------------------------------------------
+        # 3. AI Analysis  (only if API key provided)
+        # ------------------------------------------------------------------
+        ai_review = None  # None signals "not attempted"
+
+        if gemini_api_key:
             genai.configure(api_key=gemini_api_key)
-            # Using gemini-2.5-flash for fastest, most reliable generation over textual data
             llm_model = genai.GenerativeModel('gemini-2.5-flash')
-            
+
             prompt = f"""
             You are a Senior Bank Fraud Analyst. We have a transaction and a Machine Learning model prediction.
             
@@ -145,57 +167,73 @@ if st.button("Analyze Transaction", use_container_width=True, type="primary"):
             
             Return your response in markdown format.
             """
-            
+
             try:
                 response = llm_model.generate_content(prompt)
                 ai_review = response.text
             except Exception as e:
-                ai_review = f"Error calling Gemini AI: {e}"
-            
-            # Log to MongoDB
+                ai_review = f"⚠️ Error calling Gemini AI: {e}"
+
+        # ------------------------------------------------------------------
+        # 4. Log to MongoDB  (always runs when connected)
+        # ------------------------------------------------------------------
+        if client:
+            record = {
+                "timestamp": datetime.utcnow(),
+                "transaction": {
+                    "step": step,
+                    "amount": amount,
+                    "oldbalanceOrg": oldbalanceOrg,
+                    "newbalanceOrig": newbalanceOrig,
+                    "oldbalanceDest": oldbalanceDest,
+                    "newbalanceDest": newbalanceDest
+                },
+                "derived_features": {
+                    "hour": hour,
+                    "is_night": is_night,
+                    "balance_diff_orig": balance_diff_orig,
+                    "balance_diff_dest": balance_diff_dest
+                },
+                "ml_model": {
+                    "prediction": model_prediction,
+                    "confidence": round(float(pos_proba), 6)
+                },
+                # stored as None/null in MongoDB when no key was provided
+                "ai_analysis": ai_review
+            }
+            collection.insert_one(record)
+
+        # ------------------------------------------------------------------
+        # 5. Results Dashboard
+        # ------------------------------------------------------------------
+        st.markdown("---")
+        st.header("Results Dashboard")
+
+        res_col1, res_col2 = st.columns([1, 2])
+
+        with res_col1:
+            st.subheader("ML Model Prediction")
+            if model_prediction == "Fraud":
+                st.error("🚨 **ALERT**: Fraud Detected!")
+                st.markdown(f"**Confidence:** {pos_proba:.1%}")
+            else:
+                st.success("✅ **SAFE**: Legitimate Transaction.")
+                st.markdown(f"**Fraud Probability:** {pos_proba:.1%}")
+
+            st.progress(pos_proba, text="Fraud Probability Map")
+
             if client:
-                record = {
-                    "timestamp": datetime.utcnow(),
-                    "transaction": {
-                        "step": step,
-                        "amount": amount,
-                        "oldbalanceOrg": oldbalanceOrg,
-                        "newbalanceOrig": newbalanceOrig,
-                        "oldbalanceDest": oldbalanceDest,
-                        "newbalanceDest": newbalanceDest
-                    },
-                    "derived_features": {
-                        "hour": hour,
-                        "is_night": is_night,
-                        "balance_diff_orig": balance_diff_orig,
-                        "balance_diff_dest": balance_diff_dest
-                    },
-                    "ml_model": {
-                        "prediction": model_prediction,
-                        "confidence": pos_proba
-                    },
-                    "llm_review": ai_review
-                }
-                collection.insert_one(record)
-            
-            st.markdown("---")
-            st.header("Results Dashboard")
-            
-            res_col1, res_col2 = st.columns([1, 2])
-            
-            with res_col1:
-                st.subheader("ML Model Prediction")
-                if model_prediction == "Fraud":
-                    st.error(f"🚨 **ALERT**: Fraud Detected!")
-                    st.markdown(f"**Confidence:** {pos_proba:.1%}")
-                else:
-                    st.success(f"✅ **SAFE**: Legitimate Transaction.")
-                    st.markdown(f"**Fraud Probability:** {pos_proba:.1%}")
-                
-                st.progress(pos_proba, text="Fraud Probability Map")
-                if client:
-                    st.info("💾 Record successfully logged to MongoDB `fraud_detection_db.transactions`.")
-                    
-            with res_col2:
-                st.subheader("🤖 AI Analyst Review")
+                st.info("💾 Record successfully logged to MongoDB `fraud_detection_db.transactions`.")
+
+        with res_col2:
+            st.subheader("🤖 AI Analyst Review")
+
+            if ai_review is None:
+                # No key was provided – show a clear, friendly callout
+                st.warning(
+                    "**AI Analysis requires a Gemini API key.**\n\n"
+                    "The ML model has run and results have been saved to MongoDB. "
+                    "To unlock the full AI Analyst report, enter your Gemini API key in the sidebar and re-run the analysis."
+                )
+            else:
                 st.markdown(ai_review)
